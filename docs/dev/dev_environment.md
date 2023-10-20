@@ -424,7 +424,7 @@ namespace.configure(
     {
         "nautobot_secrets_providers": {
             ...
-            "nautobot_ver": "1.6.0",
+            "nautobot_ver": "1.4.0",
 	    ...
         }
     }
