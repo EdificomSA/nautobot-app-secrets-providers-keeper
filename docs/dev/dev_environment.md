@@ -61,8 +61,6 @@ To either stop or destroy the development environment use the following options.
 ---
 nautobot_secrets_providers:
   local: true
-  compose_files:
-    - "docker-compose.requirements.yml"
 ```
 
 Run the following commands:
