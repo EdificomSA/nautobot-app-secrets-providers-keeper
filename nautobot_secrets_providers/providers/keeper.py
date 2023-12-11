@@ -8,15 +8,16 @@ try:
     from keeper_secrets_manager_core import SecretsManager
     from keeper_secrets_manager_core.core import KSMCache
     from keeper_secrets_manager_core.exceptions import KeeperError, KeeperAccessDenied
-    from keeper_secrets_manager_core.storage import InMemoryKeyValueStorage
+    from keeper_secrets_manager_core.storage import FileKeyValueStorage #, InMemoryKeyValueStorage
+    # from keeper_secrets_manager_core.utils import get_totp_code
 except (ImportError, ModuleNotFoundError):
     keeper = None
 
 from django import forms
 from django.conf import settings
 
+from nautobot.apps.secrets import exceptions, SecretsProvider
 from nautobot.utilities.forms import BootstrapMixin
-from nautobot.extras.secrets import exceptions, SecretsProvider
 
 from .choices import KeeperTypeChoices
 
@@ -43,28 +44,28 @@ class KeeperSecretsProvider(SecretsProvider):
         name = forms.CharField(
             required=True,
             help_text="The name of the Keeper Secrets Manager secret",
-            max_length=300,
-            min_length=3,
+            max_length=50,
+            min_length=5,
         )
         uid = forms.CharField(
             required=True,
             help_text="The uid of the Keeper Secrets Manager secret",
-            max_length=300,
-            min_length=3,
+            max_length=50,
+            min_length=5,
         )
         token = forms.CharField(
             widget=forms.PasswordInput,
             # required=True,
             help_text="The token of the Keeper Secrets Manager",
-            max_length=300,
-            min_length=3,
+            max_length=40,
+            min_length=25,
         )
         # config = forms.FileField(
         #     required=True,
         #     help_text="The configuration file for the Keeper Secrets Manager",
         # )
         config = forms.JSONField(
-            required=True,
+            # required=True,
             help_text="The JSON configuration for the Keeper Secrets Manager",
             max_length=300,
             min_length=30,
@@ -124,7 +125,9 @@ class KeeperSecretsProvider(SecretsProvider):
             # Create a Secrets Manager client.
             secrets_manager = SecretsManager(
                 token=token,
-                config=InMemoryKeyValueStorage(config),
+                # config=InMemoryKeyValueStorage(config),
+                config=FileKeyValueStorage('config.json'),
+                log_level='DEBUG' if os.environ.get('DEBUG', None) else 'WARNING',
                 custom_post_function=KSMCache.caching_post_function
             )
         except (KeeperError, KeeperAccessDenied) as err:
@@ -151,9 +154,13 @@ class KeeperSecretsProvider(SecretsProvider):
 
         try:
             my_secret_info = secret.field(type, single=True)
+            # url = secret.get_standard_field_value('oneTimeCode', True)
+            # totp = get_totp_code(url)
             # api_key = secret.custom_field('API Key', single=True)
         except Exception as err:
             msg = f"The secret field could not be retrieved {err}"
             raise exceptions.SecretValueNotFoundError(secret, cls, msg) from err
 
         return my_secret_info
+
+# secrets_providers = [KeeperSecretsProvider]
