@@ -47,108 +47,145 @@ class KeeperSecretsProvider(SecretsProvider):
 
         name = forms.CharField(
             label="Secret Name",
-            help_text="The secret's name",
+            help_text="The name of the secret record in Keeper (optional if UID is provided)",
             max_length=30,
             min_length=5,
+            required=False,
         )
         uid = forms.CharField(
             label="Secret UID",
-            help_text="The secret's uid",
+            help_text="The unique identifier of the secret record in Keeper (optional if Name is provided)",
             max_length=25,
             min_length=20,
+            required=False,
         )
         token = forms.CharField(
-            label="Token",
+            label="Access Token",
             widget=forms.PasswordInput,
-            help_text="The One Time Token",
+            help_text="Keeper access token (optional if config is provided)",
             max_length=40,
             min_length=20,
             initial=KEEPER_TOKEN,
+            required=False,
         )
-        """
-        https://docs.keeper.io/secrets-manager/secrets-manager/developer-sdk-library
-        {
-            "hostname": "keepersecurity.com",
-            "clientId": "ab2x3z/Acz0QFTiilm8UxIlqNLlNa25KMj=TpOqznwa4Si-h9tY7n3zvFwlXXDoVWkIs3xrMjcLGwgu3ilmq7Q==",
-            "privateKey": "MLSHAgABCDEFGyqGSM49AEGCCqGSM49AwEHBG0wawIWALTARgmcnWx/DH+r7cKh4kokasdasdaDbvHmLABstNbqDwaCWhRANCAARjunta9SJdZE/LVXfVb22lpIfK4YMkJEDaFMOAyoBt0BrQ8aEhvrHN5/Z1BgZ/WpDm9dMR7E5ASIQuYUiAw0t9",
-            "serverPublicKeyId": "10",
-            "appKey": "RzhSIyKxbpjNu045TUrKaNREYIns+Hk9Kn8YtT+CtK0=",
-            "appOwnerPublicKey": "Sq1W1OAnTwi8V/Vs/lhsin2sfSoaRfOwwDDBqoP+EO9bsBMWCzQdl9ClauDiKLXGmlmyx2xmSAdH+hlxvBRs6kU="
-        }
-        """
         config = forms.JSONField(
-            label="Config",
-            help_text="The JSON configuration",
+            label="Configuration",
+            help_text="Keeper configuration in JSON format (optional if token is provided)",
             max_length=500,
             min_length=70,
+            required=False,
+            validators=[
+                lambda value: validate_keeper_config(value)
+            ]
         )
-        # config = forms.CharField(
-        #     required=True,
-        #     help_text="The base64 configuration",
-        #     max_length=300,
-        #     min_length=30,
-        # )
         type = forms.ChoiceField(
-            label="Type",
+            label="Secret Type",
             required=True,
             choices=KeeperTypeChoices.CHOICES,
-            help_text="The type of information to retrieve from the secret/record",
+            help_text="Type of information to retrieve from the secret record",
         )
 
-        """
-        Overloaded clean method to check that at least one of the secret's name or uid is provided
-        """
-
         def clean(self):
+            """Validate form data and ensure required fields are present."""
             cleaned_data = super().clean()
+            
+            # Validate secret identifier
             if not cleaned_data.get("name") and not cleaned_data.get("uid"):
-                raise forms.ValidationError("At least the secret's name or uid must be provided")
-            if cleaned_data.get("name") and cleaned_data.get("uid"):
-                raise forms.ValidationError("Only one of the secret's name or uid must be provided")
+                raise forms.ValidationError(
+                    "Either secret name or UID must be provided"
+                )
+            
+            # Validate authentication
             if not cleaned_data.get("token") and not cleaned_data.get("config"):
-                raise forms.ValidationError("At least the token or config must be provided")
+                raise forms.ValidationError(
+                    "Either access token or configuration must be provided"
+                )
+            
+            # Validate config JSON if provided
+            if cleaned_data.get("config"):
+                try:
+                    validate_keeper_config(cleaned_data["config"])
+                except ValueError as e:
+                    raise forms.ValidationError(str(e))
+            
             return cleaned_data
+
+    def validate_keeper_config(config):
+        """Validate Keeper configuration JSON structure."""
+        required_fields = ["hostname", "clientId", "privateKey"]
+        if not isinstance(config, dict):
+            raise ValueError("Configuration must be a JSON object")
+        
+        for field in required_fields:
+            if field not in config:
+                raise ValueError(f"Missing required field: {field}")
+            
+        if not isinstance(config.get("hostname"), str):
+            raise ValueError("hostname must be a string")
+            
+        return True
 
     @classmethod
     def get_value_for_secret(cls, secret, obj=None, **kwargs):
         """Return the secret value."""
-        # Extract the parameters from the Secret.
-
+        # First, try to get the UID from the custom field if an object is provided
+        if obj:
+            from nautobot.extras.models import CustomField
+            # Automatically create the custom field if it does not exist
+            if not CustomField.objects.filter(name="cf_keeper_uid").exists():
+                CustomField.objects.create(name="cf_keeper_uid", type="text", label="Keeper UID")
+            
+            uid_value = None
+            # Prioritize device's cf_keeper_uid
+            if hasattr(obj, "custom_field_data") and "cf_keeper_uid" in obj.custom_field_data:
+                uid_value = obj.custom_field_data["cf_keeper_uid"]
+            # Fall back to location's cf_keeper_uid if not found on device
+            elif hasattr(obj, "location") and obj.location and hasattr(obj.location, "custom_field_data"):
+                uid_value = obj.location.custom_field_data.get("cf_keeper_uid")
+            
+            if uid_value:
+                # If we found a UID in the custom field, use it directly
+                return uid_value
+        
+        # If no object provided or no UID found in custom fields, fall back to standard behavior
+        # Extract the parameters from the Secret
         parameters = secret.rendered_parameters(obj=obj)
-
+        
         if keeper is None:
             raise exceptions.SecretProviderError(
                 secret, cls, "The Python dependency keeper_secrets_manager_core is not installed"
             )
-
+        
         try:
+            secret_name = None
+            secret_uid = None
             if "name" in parameters:
                 secret_name = parameters["name"]
             if "uid" in parameters:
                 secret_uid = parameters["uid"]
             token = parameters.get("token", KEEPER_TOKEN)
+            config = None
             if "config" in parameters:
                 config = parameters["config"]
             type = parameters.get("type")
         except KeyError as err:
             msg = f"The secret parameter could not be retrieved for field {err}"
             raise exceptions.SecretParametersError(secret, cls, msg) from err
-
+        
         if not KEEPER_TOKEN and not token and not config:
             raise exceptions.SecretProviderError(
                 secret, cls, "Nor the Token or config is configured, at least 1 is required!"
             )
-
+        
         if not secret_name and not secret_uid:
             raise exceptions.SecretProviderError(secret, cls, "At least the secret's name or uid must be provided!")
-
+        
         # Ensure required parameters are set
-        if any([not all([secret_name, secret_uid, token, config, type])]):
+        if not token and not config:
             raise exceptions.SecretProviderError(
-                secret,
-                "Keeper Secret Manager is not configured!",
+                secret, cls, "Keeper Secret Manager is not configured!"
             )
-
+        
         try:
             # Create a Secrets Manager client.
             secrets_manager = SecretsManager(
@@ -160,14 +197,15 @@ class KeeperSecretsProvider(SecretsProvider):
             )
         except (KeeperError, KeeperAccessDenied) as err:
             msg = f"Unable to connect to Keeper Secret Manager {err}"
-            raise exceptions.SecretProviderError(secret, msg) from err
+            raise exceptions.SecretProviderError(secret, cls, msg) from err
         except Exception as err:
             msg = f"Unable to connect to Keeper Secret Manager {err}"
-            raise exceptions.SecretProviderError(secret, msg) from err
-
+            raise exceptions.SecretProviderError(secret, cls, msg) from err
+        
+        keeper_secret = None
         if secret_uid:
             try:
-                secret = secrets_manager.get_secrets(uids=secret_uid)[0]
+                keeper_secret = secrets_manager.get_secrets(uids=secret_uid)[0]
                 # # https://docs.keeper.io/secrets-manager/secrets-manager/about/keeper-notation
                 # secret = secrets_manager.get_notation(f'{secret_uid}/field/{type}')[0]
             except Exception as err:
@@ -175,16 +213,16 @@ class KeeperSecretsProvider(SecretsProvider):
                 raise exceptions.SecretValueNotFoundError(secret, cls, msg) from err
         elif secret_name:
             try:
-                secret = secrets_manager.get_secret_by_title(secret_name)
+                keeper_secret = secrets_manager.get_secret_by_title(secret_name)
             except Exception as err:
                 msg = f"The secret could not be retrieved using name {err}"
                 raise exceptions.SecretValueNotFoundError(secret, cls, msg) from err
         else:
             msg = f"At least the secret's name or uid must be provided"
             raise exceptions.SecretValueNotFoundError(secret, cls, msg)
-
+        
         try:
-            my_secret_info = secret.field(type, single=True)
+            my_secret_info = keeper_secret.field(type, single=True)
             # api_key = secret.custom_field('API Key', single=True)
             # url = secret.get_standard_field_value('oneTimeCode', True)
             # totp = get_totp_code(url)
@@ -192,5 +230,5 @@ class KeeperSecretsProvider(SecretsProvider):
         except Exception as err:
             msg = f"The secret field could not be retrieved {err}"
             raise exceptions.SecretValueNotFoundError(secret, cls, msg) from err
-
+        
         return my_secret_info
